@@ -2418,28 +2418,153 @@ def restore_existing_users():
         logging.error(f"Error restoring users: {e}")
         return 0
 
-# تشغيل البوت في خيط منفصل مع معالجة الأخطاء
+import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import signal
+import sys
+
+# تعطيل تحذيرات SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def create_retry_session():
+    """إنشاء جلسة مع إعدادات إعادة المحاولة"""
+    session = requests.Session()
+    
+    # إستراتيجية إعادة المحاولة
+    retry_strategy = Retry(
+        total=3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        method_whitelist=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"],
+        backoff_factor=1
+    )
+    
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=50, pool_maxsize=50)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    
+    return session
+
+def test_telegram_connection():
+    """اختبار الاتصال بتيليجرام"""
+    test_url = f"https://api.telegram.org/bot{BOT_TOKEN}/getMe"
+    
+    try:
+        session = create_retry_session()
+        response = session.get(test_url, timeout=10, verify=False)
+        
+        if response.status_code == 200:
+            print("✅ تم الاتصال بـ Telegram API بنجاح")
+            return True
+        else:
+            print(f"❌ فشل اختبار الاتصال: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ خطأ في اختبار الاتصال: {e}")
+        return False
+
 def start_bot():
-    check_tables_exist()
-    load_blocked_users_cache()  # تحميل قائمة المحظورين
-    restored_users = restore_existing_users()
-    print(f"Restored {restored_users} existing users")
-    print(f"Current user ratio: {user_divisor}")
-    print(f"Loaded {len(blocked_users_cache)} blocked users")
+    """بدء البوت مع معالجة محسنة للأخطاء"""
+    try:
+        check_tables_exist()
+        load_blocked_users_cache()
+        restored_users = restore_existing_users()
+        
+        print("🔍 جاري اختبار الاتصال...")
+        if not test_telegram_connection():
+            print("❌ لا يمكن الاتصال بـ Telegram API. تحقق من إعدادات الإنترنت/البروكسي.")
+            return
+        
+        print(f"✅ تم استعادة {restored_users} مستخدم")
+        print(f"✅ نسبة المستخدم الحالية: {user_divisor}")
+        print(f"✅ تم تحميل {len(blocked_users_cache)} مستخدم محظور")
+        print("🚀 بدء تشغيل البوت...")
 
-    while True:
-        try:
-            bot.remove_webhook()
-            bot.infinity_polling(timeout=30, long_polling_timeout=30)
-        except Exception as e:
-            if "409" in str(e):  # Conflict error - another instance running
-                print(f"Another bot instance detected, stopping this one...")
+        # إعدادات البوت المحسنة
+        bot_settings = {
+            'timeout': 60,
+            'long_polling_timeout': 60,
+            'logger_level': logging.WARNING
+        }
+
+        max_retries = 15
+        base_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                print(f"🔄 المحاولة {attempt + 1}/{max_retries} لبدء البوت...")
+                
+                # إزالة الويب هوك القديم
+                try:
+                    bot.remove_webhook()
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"⚠️ تحذير أثناء إزالة الويب هوك: {e}")
+
+                # بدء الاستطلاع
+                bot.infinity_polling(**bot_settings)
                 break
-            logging.error(f"Bot polling error: {e}")
-            print(f"Bot disconnected, retrying in 5 seconds...")
-            time.sleep(5)
+                
+            except requests.exceptions.ProxyError as proxy_err:
+                print(f"❌ خطأ بروكسي (المحاولة {attempt + 1}): {proxy_err}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (attempt + 1)
+                    print(f"⏳ إعادة المحاولة بعد {delay} ثواني...")
+                    time.sleep(delay)
+                else:
+                    print("🛑 تجاوز الحد الأقصى لمحاولات البروكسي")
+                    break
+                    
+            except requests.exceptions.ConnectionError as conn_err:
+                print(f"❌ خطأ اتصال (المحاولة {attempt + 1}): {conn_err}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (attempt + 1)
+                    print(f"⏳ إعادة المحاولة بعد {delay} ثواني...")
+                    time.sleep(delay)
+                else:
+                    print("🛑 تجاوز الحد الأقصى لمحاولات الاتصال")
+                    break
+                    
+            except requests.exceptions.ReadTimeout as timeout_err:
+                print(f"⏰ انتهت مهلة الاتصال (المحاولة {attempt + 1}): {timeout_err}")
+                if attempt < max_retries - 1:
+                    delay = base_delay
+                    print(f"⏳ إعادة المحاولة بعد {delay} ثواني...")
+                    time.sleep(delay)
+                else:
+                    print("🛑 تجاوز الحد الأقصى لمحاولات المهلة")
+                    break
+                    
+            except Exception as e:
+                error_type = type(e).__name__
+                print(f"❌ خطأ غير متوقع [{error_type}] (المحاولة {attempt + 1}): {e}")
+                if attempt < max_retries - 1:
+                    delay = base_delay * (attempt + 1)
+                    print(f"⏳ إعادة المحاولة بعد {delay} ثواني...")
+                    time.sleep(delay)
+                else:
+                    print("🛑 تجاوز الحد الأقصى للمحاولات")
+                    break
 
-# البوت سيبدأ فقط عند تشغيل الملف مباشرة
+        print("🛑 توقف البوت تماماً")
+
+    except Exception as e:
+        print(f"💥 خطأ حرج في بدء التشغيل: {e}")
+        print("🔄 إعادة تشغيل البوت بعد 30 ثانية...")
+        time.sleep(30)
+        start_bot()  # إعادة التشغيل التلقائي
+
+def signal_handler(sig, frame):
+    print('🛑 تم استقبال إشارة إيقاف، إغلاق البوت بشكل نظيف...')
+    try:
+        bot.stop_polling()
+    except:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 if __name__ == '__main__':
+    print("🎯 بدء تشغيل البوت المحسن...")
     start_bot()
