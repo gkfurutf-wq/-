@@ -2431,11 +2431,11 @@ def create_retry_session():
     """إنشاء جلسة مع إعدادات إعادة المحاولة"""
     session = requests.Session()
     
-    # إستراتيجية إعادة المحاولة
+    # إستراتيجية إعادة المحاولة - الإصدار الحديث
     retry_strategy = Retry(
         total=3,
         status_forcelist=[429, 500, 502, 503, 504],
-        method_whitelist=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"],
+        allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"],  # ✅ تم التغيير هنا
         backoff_factor=1
     )
     
